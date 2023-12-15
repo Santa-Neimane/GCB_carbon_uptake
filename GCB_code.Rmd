@@ -1,0 +1,1502 @@
+---
+title: "FINAL_ALLin1"
+output: html_document
+date: "2023-09-18"
+---
+
+
+# Working envrioment
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,include=FALSE}
+library(lubridate)
+library(httr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(PerformanceAnalytics)
+library(minpack.lm)
+library(ggplot2)
+library(tibble)
+library(showtext)
+library(gridExtra)
+library(patchwork)
+library(tidyverse)
+library(hms)
+library(cowplot)
+library(ggpmisc)
+library(GGally)
+library(ggpubr)
+library(lme4)
+library(ggpubr)
+library(nlme)
+library(rstatix)
+library(ggfortify)
+library(multcomp)
+library(factoextra)
+library(missMDA)
+library(ggrepel)
+library(FactoMineR)
+library(reshape)
+library(ggridges)
+
+
+# Theme -------------------------------------------------------------------
+
+theme_PlainGray <- function(){
+  font <- "sans"   #assign font family up front
+  theme_classic() %+replace%    #replace elements we want to change
+    theme(
+      text=element_text(family=font),
+      axis.text.y = element_text(colour = "#696969", size=10),
+      axis.text.x = element_text(colour = "#696969", size=10),
+      axis.title = element_text(colour = "gray18", size=10),
+      axis.ticks = element_line(colour = "#C0C0C0", size=0.1),
+      axis.line = element_line(colour = "#A9A9A9", size = 0.1),
+      legend.text = element_text(hjust = 0,size=10),
+      legend.title=element_text(size=10)
+    )
+}
+
+
+diffuse_exp <- expression(italic("Diffuse"))
+direct_exp <-  expression(italic("Direct"))
+heterogenous_exp <-  expression(italic("Heterogeneous"))
+
+my.formula <- y ~ x
+```
+
+# Enviromental data 
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,include=FALSE}
+met <- read.csv("meterology.csv") # Air temperature and relative humidity can be dowloaded from https://en.ilmatieteenlaitos.fi/download-observations
+met$Datetime <- as_datetime(met$Datetime)
+
+
+
+Radiation <- read.csv('Radiation_average_30.csv') # Radiation data can be obtained from https://smear.avaa.csc.fi/download, this study site was - Hyytiala Forest
+# Here also Diffuse Fraction was calculated by dividing diffuse PAR with total PAR
+
+
+
+# Minute resolution diffuse and total PAR data is joined. Obtained from the previously mentioned AVAA
+RadiationMinute <- read.csv('RadiationMinute.csv')
+RadiationMinute <- RadiationMinute[,7:8]
+colnames(RadiationMinute)[1] <- "PARtotal_minute"
+
+DiffuseRadiationMinute <- read.csv('DiffuseRadiationMinute.csv')
+DiffuseRadiationMinute$Datetime <- as_datetime(DiffuseRadiationMinute$Datetime)
+DiffuseRadiationMinute <- DiffuseRadiationMinute[,7:8]
+colnames(DiffuseRadiationMinute)[1] <- "DiffusePARtotal_minute"
+ 
+AllRadiationMinute <- left_join(RadiationMinute,DiffuseRadiationMinute, by='Datetime')
+
+
+
+# In similar manner the below canopy PAR measurements are read-in. Also available from AVAA.
+BelowPAR <- read.csv('BelowPAR_average30.csv')
+BelowPAR$Datetime <- as_datetime(BelowPAR$Datetime)
+BelowPAR <- BelowPAR[,7:8]
+```
+
+
+# Timepoint selection
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,include=FALSE}
+# In empty table timepoints, when criteria for radiation conditions are met, are saved
+# Criteria are based on the diffuse fraction
+# Radiation conditions have to last for 1 hour, only second half-hour timepointe is selected
+
+Data2Diff <- data.frame()
+
+for(i in 1:(nrow(Radiation)-1))
+{
+  if(Radiation[i,"DiffFract"] > 60){
+    if(Radiation[i+1,"DiffFract"] > 60){
+      if(Radiation[i+1, "Datetime"]==Radiation[i, "Datetime"]+minutes(30)){
+        Data2Diff <- rbind(Data2Diff, Radiation[i+1,])
+      }
+      else {next()}
+
+    }
+    else {next()}
+  } else {next()}
+
+}
+
+
+Data2Diff$RadiationConditions <- "Diffuse"
+
+
+
+Data2Direct <- data.frame()
+
+for(i in 1:nrow(Radiation))
+{
+  if(Radiation[i,"DiffFract"] < 20){
+    if(Radiation[i+1,"DiffFract"] < 20){
+      if(Radiation[i+1, "Datetime"]==Radiation[i, "Datetime"]+minutes(30)){
+        Data2Direct <- rbind(Data2Direct, Radiation[i+1,])
+      }
+      else {next()}
+
+    }
+    else {next()}
+  } else {next()}
+
+}
+
+
+Data2Direct$RadiationConditions <- "Direct"
+
+
+
+Data2Het <- data.frame()
+
+for(i in 1:nrow(Radiation))
+{
+  if(Radiation[i,"DiffFract"] > 20 & Radiation[i,"DiffFract"] < 60 ){
+    if(Radiation[i+1,"DiffFract"] > 20 & Radiation[i+1,"DiffFract"] < 60 ){
+      if(Radiation[i+1, "Datetime"]==Radiation[i, "Datetime"]+minutes(30)){
+        Data2Het <- rbind(Data2Het, Radiation[i+1,])
+      }
+      else {next()}
+
+    }
+    else {next()}
+  } else {next()}
+
+}
+
+
+Data2Het$RadiationConditions <- "Heterogeneous"
+
+DatesLightCond <- rbind(Data2Diff,Data2Direct,Data2Het)
+
+# Variable is renamed so it would not be mixed up with the PAR measurement at the minute of the measurement
+colnames(DatesLightCond)[9] <- "PARtotal_30"
+```
+
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,include=FALSE}
+# Timepoints are joined with weather data and reduced to the selected timeframe for the study
+RadMet <- left_join(DatesLightCond, met, by='Datetime')
+RadMet <- filter(RadMet, Month > 5 & Month < 9 & Hour > 9 & Hour < 17)
+```
+
+
+
+
+
+# Ecosystem level data
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE,include=FALSE}
+EcosystemFluxes2 <- read.csv("Ecosystem_Fluxes.csv") # Again GPP and Evaporation data can be directly obtained from AVAA
+EcosystemFluxes2 <- EcosystemFluxes2[ ,7:12]
+
+Ecosystem <-left_join(RadMet,EcosystemFluxes2, by='Datetime')
+Ecosystem <- filter(Ecosystem, (!is.na(HYY_EDDY233.GPP)))
+Ecosystem$Date <- dmy(paste(Ecosystem$Day, Ecosystem$Month, Ecosystem$Year, sep = "-"))
+CVecos <- sd(Ecosystem$HYY_EDDY233.GPP)/ mean(Ecosystem$HYY_EDDY233.GPP) # Coefficient of variation calculation
+```
+
+
+
+```{r}
+EcoDir <- filter(Ecosystem, RadiationConditions=="Direct")
+EcoDiff <- filter(Ecosystem, RadiationConditions=="Diffuse")
+EcoHet <- filter(Ecosystem, RadiationConditions=="Heterogeneous")
+
+GraphEco <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Gross primary productivity, ',paste(CO[2], ' ',mu,'mol ',m^{-2},s^{-1}))))+
+  geom_point(data=Ecosystem, aes(y=HYY_EDDY233.GPP,x=PARtotal_30, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = EcoDiff,
+              aes(x=PARtotal_30,y=HYY_EDDY233.GPP,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0= 0.04478,Pgmax=41.88864)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = EcoDir,
+              aes(x=PARtotal_30,y=HYY_EDDY233.GPP,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.01808,Pgmax=49.38147)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = EcoHet,
+              aes(x=PARtotal_30,y=HYY_EDDY233.GPP,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.01808,Pgmax=49.38147)),
+              se = FALSE,
+              na.rm = TRUE)+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99" ))+
+  theme(legend.position = 'top',
+        axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  xlim(0, 2200)+
+  theme(legend.title = element_text(face = "bold"))+
+  annotate("text", x = 2000, y=30, label ="A", family = "sans", fontface = "bold", size=4)
+
+GraphEco
+```
+
+
+```{r}
+# Mixed effect model
+LMGPP <- lme(HYY_EDDY233.GPP ~ RadiationConditions+PARtotal_30, random=~1|Date, data=Ecosystem)
+summary(LMGPP)
+```
+
+
+```{r}
+# Model assumptions
+ggqqplot(residuals(LMGPP))
+Ecosystem$resid <- residuals(LMGPP)
+ggplot(Ecosystem, aes(resid, color=RadiationConditions))+
+  geom_density()
+
+plot(fitted(LMGPP), residuals(LMGPP))
+
+ggplot(Ecosystem, aes(y=resid,x=RadiationConditions, color=RadiationConditions))+
+  geom_boxplot()
+```
+
+
+```{r}
+post_hoc <- glht(LMGPP,linfct = mcp(RadiationConditions = "Tukey"), test = adjusted("bonferroni"))
+post_hoc2 <-  cld(post_hoc, Letters = LETTERS, reverse = FALSE)
+
+```
+
+
+```{r}
+EcosystemRUE <- Ecosystem
+EcosystemRUE$DiffFractFraction <- EcosystemRUE$DiffFract/100
+EcosystemRUE$RUE <- EcosystemRUE$HYY_EDDY233.GPP / EcosystemRUE$PARtotal_30
+
+
+RUEEco <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Ecosystem radiation-use efficiency, ',paste(CO[2], ' ',mu,'mol PAR ',mu,'mol'^{-1}))))+
+  geom_point(data=EcosystemRUE, aes(y=RUE,x=DiffFractFraction), alpha=0.1, shape=1,size=0.1,stroke =0.5, color="#5986F1")+
+  geom_smooth(data=EcosystemRUE, aes(y=RUE,x=DiffFractFraction, color='Ecosystem'), method = lm, se=TRUE)+
+  stat_poly_eq(formula = my.formula,
+               data = EcosystemRUE,
+               aes(y=RUE,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#5986F1')+
+  guides(color=guide_legend(override.aes=list(fill=NA)))+
+  theme(legend.title = element_text(face = "bold"))+
+  xlab("Diffuse fraction")+
+  coord_cartesian(xlim =c(0,1), ylim = c(-0.01,0.075))+
+  scale_color_manual(name='Scale',
+                     breaks=c('Shoot', 'Forest Floor', 'Ecosystem'),
+                     values=c('Shoot'='#DD673A', 'Forest Floor'='#009D77','Ecosystem'='#5986F1'))+
+  theme(legend.title = element_blank())+
+  theme(
+        axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  annotate("text", x = 1, y=0.06, label ="A", family = "sans", fontface = "bold", size=4)
+
+```
+
+
+```{r}
+#Separate file for water use efficiency since there are a lot of missing values in the dataset
+EcosystemWater <- filter(Ecosystem, HYY_EDDY233.Qc_gapf_ET<1)
+EcosystemWater$DiffFractFraction <- EcosystemWater$DiffFract/100
+#remove ~50 points that are negative
+EcosystemWater <- filter(EcosystemWater, EcosystemWater$HYY_EDDY233.ET_gapf > 0)
+EcosystemWater$WUE <- EcosystemWater$HYY_EDDY233.GPP / EcosystemWater$HYY_EDDY233.ET_gapf
+#Remove 3 outliers
+EcosystemWater <- filter(EcosystemWater, WUE<200)
+```
+
+
+```{r}
+WUEEco <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Ecosystem water-use efficiency, ',paste(CO[2], ' ',mu,'mol ',H[2],'O ','mmol'^{-1}))))+
+  geom_point(data=EcosystemWater, aes(y=WUE,x=DiffFractFraction), alpha=0.05, shape=1,size=0.1,stroke =0.5, color="#5986F1")+
+  geom_smooth(data=EcosystemWater, aes(y=WUE,x=DiffFractFraction, color='Ecosystem'), method = lm, se=TRUE)+
+  stat_poly_eq(formula = my.formula,
+               data = EcosystemWater,
+               aes(y=WUE,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#5986F1')+
+  guides(color=guide_legend(override.aes=list(fill=NA)))+
+  theme(legend.title = element_text(face = "bold"))+
+  xlab("Diffuse fraction")+
+  #coord_cartesian(xlim =c(0,1), ylim = c(-0.01,0.075))+
+  scale_color_manual(name='Scale',
+                     breaks=c('Shoot', 'Forest Floor', 'Ecosystem'),
+                     values=c('Shoot'='#DD673A', 'Forest Floor'='#009D77','Ecosystem'='#5986F1'))+
+  theme(legend.title = element_blank())+
+  theme(
+    axis.line.x = element_blank(),  # remove x axis line
+    axis.text.x = element_blank(),  # remove x axis labels
+    axis.ticks.x = element_blank(), # remove x axis ticks
+    axis.title.x = element_blank())+
+  annotate("text", x = 1, y=90, label ="A", family = "sans", fontface = "bold", size=4)
+```
+
+
+
+# Shoot Scale data preparation
+
+
+```{r}
+# All the raw files were obtained from Zolondo data respiratory
+filenames <- list.files(full.names = FALSE)
+print(filenames)
+DataFrameShoot <- data.frame()
+
+for (i in filenames){
+  mydata <- read.table(paste0(i),header = TRUE, fill = TRUE)
+  mydata$PAR <- as.character(mydata$PAR)
+  mydata$FileName <- i
+  DataFrameShoot <- bind_rows(DataFrameShoot,mydata[ ,c("yyyy","mm","dd","HH", "MM",
+                                                        "PAR","Tamb","F_CO2","F_H2O", "FileName")])
+}
+
+DataFrameShootSep <- separate(data=DataFrameShoot, col=FileName, 
+                              into=c("ProcessingStage",
+                                     "SourceMeasurement",
+                                     "Year",
+                                     "Chamber",
+                                     "YearFromFile",
+                                     "ChamberTypeAndFileType"),
+                              sep="_")
+
+DataFrameShootSep2 <- separate(data=DataFrameShootSep, col=ChamberTypeAndFileType, 
+                               into=c("ChamberType",
+                                      "FileType"),
+                               sep="\\.")
+
+DataFrameShootSep2Date <- DataFrameShootSep2 %>%
+  mutate(TrueDateTime = make_datetime(yyyy, mm, dd, HH, MM))
+
+DataFrameShootSep2Date$Datetime <- round_date(DataFrameShootSep2Date$TrueDateTime, "30 minutes")
+```
+
+ 
+ 
+ 
+```{r}
+Shootraw <- DataFrameShootSep2Date
+Shootraw <- Shootraw[Shootraw$F_CO2 != -999.00, ] #remove empty values
+Shootraw$Datetime <- as_datetime(Shootraw$Datetime)
+Shootraw$TrueDateTime <- as_datetime(Shootraw$TrueDateTime)
+```
+ 
+ 
+ 
+```{r}
+Shoot <- left_join(Shootraw, AllRadiationMinute, by=c('TrueDateTime'= 'Datetime'))
+Shoot <- Shoot[Shoot$Tamb != -999.00, ]
+Shoot <- Shoot[Shoot$F_CO2 != -999.00, ]
+
+Shoot$GroupLabel <- paste0(Shoot$Year,"_",Shoot$Chamber)
+ShootNight <- Shoot %>% 
+  filter(mm>4 & mm<11) %>%
+  filter(HH>21|HH<5)  %>%
+  filter(PARtotal_minute < 0.01) %>% 
+  filter(YearFromFile !="0y")
+```
+ 
+ 
+ 
+ 
+```{r}
+ShootNight$Graph_F_CO2 <- ShootNight$F_CO2 * (-1)
+ggplot(ShootNight, aes(x = Tamb, y = Graph_F_CO2))+ 
+  geom_point(alpha=0.4, color="grey", shape=16)+
+  stat_poly_line(color='#DD673A') +
+  stat_poly_eq(label.y = "bottom") +
+  facet_wrap(GroupLabel2~., ncol=3)+
+  theme_PlainGray()+
+  xlab('Air temperature, °C')+
+  labs(y=expression(paste('Night-time shoot respiration, mg C',O[{2}],' ',m^{-2},' ',s^{-1})))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "lightgrey", fill = NA))
+
+```
+ 
+ 
+```{r}
+# Extrapolating day-time respiration from night time Flux dependency on temperature
+
+df <- data.frame()
+ID <- unique(ShootNight$GroupLabel)
+print(ID)
+
+for (i in 1:length(ID)){
+  temp <- ShootNight[ShootNight$GroupLabel==ID[i],]
+  model <- nlsLM(F_CO2 ~ a+(b*Tamb),
+                 data = temp, 
+                 start = list(a = 1,b=1))
+  cf <- coef(summary(model))
+  cf_new <- cbind(cf, ID[i])
+  df <- rbind(df,cf_new)
+}
+
+
+
+names(df)[2]<- "StdError"
+names(df)[3]<- "tvalue"
+names(df)[4]<- "Pr_t"
+names(df)[5]<-"GroupLabel"
+
+
+df <- rownames_to_column(df, 'coeff')
+df$coeff <- substr(df$coeff, 1, 1)
+CoefJoin <- df[,c(1,2,6)]
+
+
+CoefJoinWide <- pivot_wider(data=CoefJoin,
+                            names_from=coeff,
+                            values_from = Estimate)
+
+ShootResp <- Shoot %>% 
+  left_join(CoefJoinWide, by="GroupLabel")
+
+ShootResp$a <- as.numeric(ShootResp$a)
+ShootResp$b <- as.numeric(ShootResp$b)
+
+
+ShootResp$Respiration <- ShootResp$a + (ShootResp$b*ShootResp$Tamb)
+ShootResp$Photosynt <- (ShootResp$F_CO2-ShootResp$Respiration)
+ShootResp$ShootPhotoMol <- ShootResp$Photosynt/44.01
+```
+ 
+ 
+ 
+
+ 
+
+```{r}
+ShootData <- ShootResp
+ShootData2 <- ShootData[!is.nan(ShootData$F_CO2),]
+
+# Scaling maximum photosynthesis values
+ShootMinMax <- ShootData2 %>% 
+  group_by(Chamber, Year) %>% 
+  filter(mm>3&mm<12) %>% 
+  filter(PARtotal_minute>0.01) %>% 
+  summarize(min=min(ShootPhotoMol),
+            max=max(ShootPhotoMol),
+            minq=quantile(ShootPhotoMol,0.05, na.rm=TRUE),
+            maxq=quantile(ShootPhotoMol,0.95,na.rm=TRUE))
+
+ShootMinMax$GroupLabel <- paste0(ShootMinMax$Chamber,'_', ShootMinMax$Year)
+ShootData2$GroupLabel <- paste0(ShootData2$Chamber,'_', ShootData2$Year)
+ShootData3 <- left_join(ShootData2, ShootMinMax[,3:7], by='GroupLabel')
+
+ShootData3$ShootPhotoMolScaled <- (ShootData3$ShootPhotoMol - ShootData3$minq)/(ShootData3$maxq - ShootData3$minq)
+
+
+ShootData3 <- ShootData3[,7:32]
+ShootData3$Datetime <- as_datetime(ShootData3$Datetime)
+```
+
+
+```{r}
+Shoot <- left_join(RadMet, ShootData3, by='Datetime')
+Shoot <- filter(Shoot, (!is.na(F_CO2)))
+```
+
+
+```{r}
+Shoot$TrueDateTime <- as_datetime(Shoot$TrueDateTime)
+AllRadiationMinute$Datetime <- as_datetime(AllRadiationMinute$Datetime)
+ShootMinRad <- Shoot
+
+
+ShootMinRad$DiffFract_minute <- (ShootMinRad$DiffusePARtotal_minute/ShootMinRad$PARtotal_minute)*100
+
+# Setting additional criteria that the radiation conditions at the minute of the measurement must match 30 minute average category
+ShootMinRad$RadiationConditions_minute[(ShootMinRad$DiffFract_minute<20)] <- "Direct"
+ShootMinRad$RadiationConditions_minute[(ShootMinRad$DiffFract_minute>60)] <- "Diffuse"
+ShootMinRad$RadiationConditions_minute[is.na(ShootMinRad$RadiationConditions_minute)] <- "Heterogeneous"
+
+ShootMinRad$RadiationConditions_joined[(ShootMinRad$RadiationConditions_minute==ShootMinRad$RadiationConditions)] <- "True"
+
+ShootMinRad2 <- filter(ShootMinRad,(!is.na(ShootMinRad$RadiationConditions_joined)))
+```
+
+
+
+
+```{r}
+#Filtering to remove outliers
+ShootMinRad2 <- filter(ShootMinRad2,(!(PARtotal_30>250 & ShootPhotoMolScaled<0.2)))
+
+CVshoot <- sd(ShootMinRad2 $ShootPhotoMolScaled)/ mean(ShootMinRad2 $ShootPhotoMolScaled) #Coefficient of variation
+```
+
+
+```{r}
+ShootDir <- filter(ShootMinRad2, RadiationConditions=="Direct")
+ShootDiff <- filter(ShootMinRad2, RadiationConditions=="Diffuse")
+ShootHet <- filter(ShootMinRad2, RadiationConditions=="Heterogeneous")
+
+GraphShoot <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Pine shoot normalized', paste('photosynthetic rate'))))+
+  geom_point(data=ShootMinRad2, aes(y=ShootPhotoMolScaled,x=PARtotal_minute, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = ShootDiff,
+              aes(x=PARtotal_minute,y=ShootPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.002621,Pgmax=1.745415)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = ShootDir,
+              aes(x=PARtotal_minute,y=ShootPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.004185,Pgmax=1.181570)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = ShootHet,
+              aes(x=PARtotal_minute,y=ShootPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.002621,Pgmax=1.745415)),
+              se = FALSE,
+              na.rm = TRUE)+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  theme(
+        axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  xlim(0, 2200)+
+  ylim(-0.04, 1.5)+
+  theme(legend.title = element_text(face = "bold"))+
+  annotate("text", x = 2000, y=1.5, label ="B", family = "sans", fontface = "bold", size=4)
+```
+
+
+
+```{r}
+# Mixed effect model
+ShootMinRad2$Date <- dmy(paste(ShootMinRad2$Day, ShootMinRad2$Month, ShootMinRad2$Year.x, sep = "-"))
+LMshoot <- lme(ShootPhotoMolScaled ~ RadiationConditions+PARtotal_minute,random=~1|Date/Chamber, data=ShootMinRad2)
+```
+
+
+```{r}
+post_hoc <- glht(LMshoot,linfct = mcp(RadiationConditions = "Tukey"), test = adjusted("bonferroni"))
+summary(post_hoc)
+```
+
+
+```{r}
+# Model assumptions
+ggqqplot(residuals(LMshoot))
+
+ShootMinRad2$resid <- residuals(LMshoot)
+ggplot(ShootMinRad2, aes(resid, color=RadiationConditions))+
+  geom_density()
+
+plot(fitted(LMshoot), residuals(LMshoot))
+
+ggplot(ShootMinRad2, aes(y=resid,x=RadiationConditions, color=RadiationConditions))+
+  geom_boxplot()
+```
+
+
+
+```{r}
+ShootMinRad2RUE <-  ShootMinRad2
+ShootMinRad2RUE$DiffFractFraction <- ShootMinRad2RUE$DiffFract_minute/100
+ShootMinRad2RUE$RUEScaled <- ShootMinRad2$ShootPhotoMolScaled / ShootMinRad2$PARtotal_minute
+```
+
+
+```{r}
+# Separate table for WUE 
+ShootMinRad2Water <- filter(ShootMinRad2,F_H2O > -100) #Remove empty -999
+ShootMinRad2Water <- filter(ShootMinRad2Water,F_H2O > 0.0) #Remove negative transpiratioon
+
+ShootMinRad2Water$WUE <- ShootMinRad2Water$ShootPhotoMol / ShootMinRad2Water$F_H2O
+ShootMinRad2Water$WUEScaled <- ShootMinRad2Water$ShootPhotoMolScaled / ShootMinRad2Water$F_H2O
+
+ShootMinRad2WUE <-  ShootMinRad2Water
+ShootMinRad2WUE$DiffFractFraction <- ShootMinRad2WUE$DiffFract_minute/100
+ShootMinRad2WUE$WUE_mmol <- ShootMinRad2WUE$ShootPhotoMolScaled / (ShootMinRad2WUE$F_H2O/18.01528) 
+
+ShootMinRad2WUE <- filter(ShootMinRad2WUE,WUE_mmol<250) # outliers
+
+ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Water-use efficiency,',paste('normalized photosynthetic rate ',H[2],'O ','mmol'^{-1}))))+
+  geom_point(data=ShootMinRad2WUE, aes(y=WUE_mmol,x=DiffFractFraction), alpha=0.5, shape=1,size=1,stroke =0.5, color='#DD673A')+
+  stat_poly_eq(formula = my.formula,
+               data = ShootMinRad2WUE,
+               aes(y=WUE_mmol,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#DD673A')
+
+
+```
+
+
+
+# Forest floor vegetation
+
+
+
+```{r}
+# Joining files
+filenames <- list.files(full.names = FALSE) # Files from Zolonado
+print(filenames)
+
+
+DataFrameVeg <- data.frame()
+
+for (i in filenames){
+  mydata <- read.table(paste0(i),header = TRUE, fill = TRUE)
+  mydata$FileName <- i
+  DataFrameVeg <- bind_rows(DataFrameVeg,mydata[ ,c("yyyy","mm","dd","HH", "MM",
+                                                    "Tamb", "Tcuv", "RHcuv", "F_H2O", "F_CO2", "FileName")])
+}
+
+DataFrameVegSep <- separate(data=DataFrameVeg, col=FileName, 
+                            into=c("ProcessingStage",
+                                   "SourceMeasurement",
+                                   "Year",
+                                   "ChamberAndFileType"),
+                            sep="_")
+
+DataFrameVegSep2 <- separate(data=DataFrameVegSep, col=ChamberAndFileType, 
+                             into=c("Chamber",
+                                    "FileType"),
+                             sep="\\.")
+```
+
+
+```{r}
+# Extrapolating day-time respiration from night time flux dependency on temperature
+DataFrameVegSep2Date <- DataFrameVegSep2 %>%
+  mutate(TrueDateTime = make_datetime(yyyy, mm, dd, HH, MM))
+
+DataFrameVegSep2Date$Datetime <- round_date(DataFrameVegSep2Date$TrueDateTime, "30 minutes")
+
+Veg <- DataFrameVegSep2Date
+Veg$Datetime <- as_datetime(Veg$Datetime)
+Veg$GroupLabel <- paste0(Veg$Year,"_",Veg$Chamber)
+
+Veg <- Veg[Veg$F_CO2 != -999.00, ]
+Veg <- Veg[Veg$Tcuv != -999.00, ]
+
+Veg <- left_join(Veg, BelowPAR, by='Datetime')
+AllRadiationMinute$Datetime  <- as_datetime(AllRadiationMinute$Datetime)
+Veg2 <- left_join(Veg, AllRadiationMinute, by=c('TrueDateTime'='Datetime'))
+
+VegTempNight <- Veg2 %>%
+    filter(mm >4 & mm<11) %>%
+    filter(HH>21|HH<5)  %>%
+    filter(PARtotal_minute < 0.1)
+
+df <- data.frame()
+ID <- unique(VegTempNight$GroupLabel)
+ID
+
+for (i in 1:length(ID)){
+  temp <- VegTempNight[VegTempNight$GroupLabel==ID[i],]
+  model <- nlsLM(F_CO2 ~ a+(Tcuv*b),
+                 data = temp, 
+                 start = list(a = 0,b=0))
+  cf <- coef(summary(model))
+  cf_new <- cbind(cf, ID[i])
+  df <- rbind(df,cf_new)
+}
+
+VegTempNight$Graph_F_CO2 <- VegTempNight$F_CO2 * (-1)
+
+
+ggplot(VegTempNight, aes(x=Tcuv, y=Graph_F_CO2))+ 
+  geom_point(alpha=0.4, color="lightgrey", shape=16)+
+  stat_poly_line(color="#009D77") +
+  stat_poly_eq(label.y = "top") +
+  facet_wrap(GroupLabel~., ncol=3)+
+  theme_PlainGray()+
+  xlab('Temperature near the soil humus-layer, °C')+
+  labs(y=expression(paste('Night-time forest floor respiration, mg C',O[{2}],' ',m^{-2},' ',s^{-1})))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "lightgrey", fill = NA))
+
+
+names(df)[2]<- "StdError"
+names(df)[3]<- "tvalue"
+names(df)[4]<- "Pr_t"
+names(df)[5]<-"GroupLabel"
+
+
+df <- rownames_to_column(df, 'coeff')
+df$coeff <- substr(df$coeff, 1, 1)
+```
+
+
+```{r}
+CoefJoin <- df[,c(1,2,6)]
+
+CoefJoinWide <- pivot_wider(data=CoefJoin,
+                            names_from=coeff,
+                            values_from = Estimate)
+
+#Join Working file with coefTable
+VegAccountResp <- Veg %>% 
+  left_join(CoefJoinWide, by="GroupLabel")
+
+VegAccountResp$a <- as.numeric(VegAccountResp$a)
+VegAccountResp$b <- as.numeric(VegAccountResp$b)
+
+VegAccountResp$Respiration <- VegAccountResp$a + (VegAccountResp$Tcuv*VegAccountResp$b)
+VegAccountResp$Photosynt <- (VegAccountResp$F_CO2-VegAccountResp$Respiration)
+
+#Respiration already from the model is positive and the raw flux is negative indicating efflux
+VegAccountResp$FloorVegPhotoMol <- (VegAccountResp$Photosynt/44.01)
+VegAccountResp$Datetime <- as_datetime(VegAccountResp$Datetime)
+```
+
+
+
+```{r}
+#Scaling photosynthetic rate
+VegData2 <- VegAccountResp[!is.na(VegAccountResp$F_CO2),]
+VegData2$Datetime <- as_datetime(VegData2$Datetime)
+
+VegData2$TrueDateTime <- as_datetime(VegData2$TrueDateTime)
+AllRadiationMinute$Datetime <- as_datetime(AllRadiationMinute$Datetime)
+VegData2 <- left_join(VegData2, AllRadiationMinute, by=c('TrueDateTime'='Datetime'))
+
+
+VegMinMax <- VegData2 %>% 
+  group_by(Chamber, Year) %>%
+  filter(mm>3 &mm<12) %>% 
+  filter(PARtotal_minute>0) %>% 
+  summarize(min=min(FloorVegPhotoMol),
+            max=max(FloorVegPhotoMol),
+            minq=quantile(FloorVegPhotoMol,0.05,na.rm=TRUE),
+            maxq=quantile(FloorVegPhotoMol,0.95,na.rm=TRUE))
+
+VegMinMax$GroupLabel <- paste0(VegMinMax$Chamber,'_', VegMinMax$Year)
+VegData2$GroupLabel <- paste0(VegData2$Chamber,'_', VegData2$Year)
+
+
+VegData3 <- left_join(VegData2, VegMinMax[,3:7], by='GroupLabel')
+VegData3$FloorVegPhotoMolScaled <- (VegData3$FloorVegPhotoMol-VegData3$minq)/(VegData3$maxq - VegData3$minq)
+VegData3$Datetime <- as_datetime(VegData3$Datetime)
+```
+
+
+
+```{r}
+Veg <- left_join(RadMet, VegData3, by='Datetime')
+Veg <- filter(Veg, (!is.na(F_CO2)))
+VegMinRad <- Veg
+VegMinRad$DiffFract_minute <- (VegMinRad$DiffusePARtotal_minute/VegMinRad$PARtotal_minute)*100
+
+# Setting additional criteria that the radiation condition category at the minute of the measurement, match the 30 min category.
+VegMinRad$RadiationConditions_minute[(VegMinRad$DiffFract_minute<20)] <- "Direct"
+VegMinRad$RadiationConditions_minute[(VegMinRad$DiffFract_minute>60)] <- "Diffuse"
+VegMinRad$RadiationConditions_minute[is.na(VegMinRad$RadiationConditions_minute)] <- "Heterogeneous"
+
+VegMinRad$RadiationConditions_joined[(VegMinRad$RadiationConditions_minute==VegMinRad$RadiationConditions)] <- "True"
+
+VegMinRad2 <- filter(VegMinRad,(!is.na(VegMinRad$RadiationConditions_joined)))
+
+CVveg <- sd(VegMinRad2$FloorVegPhotoMolScaled)/ mean(VegMinRad2$FloorVegPhotoMolScaled)
+```
+
+
+
+```{r}
+VegDir <- filter(VegMinRad2, RadiationConditions=="Direct")
+VegDiff <- filter(VegMinRad2, RadiationConditions=="Diffuse")
+VegHet <- filter(VegMinRad2, RadiationConditions=="Heterogeneous")
+
+GraphForestFloor <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Forest floor vegetation', paste('normalized photosynthetic rate'))),
+       x=expression(paste('PAR, ',mu,'mol ',m^{-2},' ',s^{-1})))+
+  geom_point(data=VegMinRad2, aes(y=FloorVegPhotoMolScaled,x=PARtotal_minute, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = VegDiff,
+              aes(x=PARtotal_minute,y=FloorVegPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.002621,Pgmax=1.745415)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = VegDir,
+              aes(x=PARtotal_minute,y=FloorVegPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.004185,Pgmax=1.181570)),
+              se = FALSE,
+              na.rm = TRUE)+
+  stat_smooth(data = VegHet,
+              aes(x=PARtotal_minute,y=FloorVegPhotoMolScaled,color=RadiationConditions),
+              method = "nls", formula = y ~ ((phiI0 * x* Pgmax) / (phiI0 * x + Pgmax)),
+              method.args = list(start = c(phiI0=0.002621,Pgmax=1.745415)),
+              se = FALSE,
+              na.rm = TRUE)+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  xlim(0, 2200)+
+  theme(legend.title = element_text(face = "bold"))+
+  annotate("text", x = 2000, y=1.5, label ="C", family = "sans", fontface = "bold", size=4)
+
+```
+
+
+
+```{r}
+VegMinRad2$Date <- dmy(paste(VegMinRad2$Day, VegMinRad2$Month, VegMinRad2$Year.x, sep = "-"))
+
+VegMinRad2$RadiationConditions <- as.factor(VegMinRad2$RadiationConditions)
+VegMinRad2$Chamber <- as.factor(VegMinRad2$Chamber)
+
+# Mixed effect model
+LMfloor55 <- lme(FloorVegPhotoMolScaled ~ RadiationConditions+PARtotal_minute, random=~1|Date/Chamber, data=VegMinRad2)
+```
+
+
+```{r}
+post_hoc2 <- glht(LMfloor55,linfct = mcp(RadiationConditions = "Tukey"), test = adjusted("bonferroni"))
+summary(post_hoc2)
+anova(LMfloor55)
+```
+
+
+```{r}
+# Model assumptions
+VegMinRad2$resid <- residuals(LMfloor55)
+
+ggplot(VegMinRad2, aes(resid, color=RadiationConditions))+
+  geom_density()
+
+ggqqplot(VegMinRad2$resid)
+
+ggplot(VegMinRad2, aes(y=resid,x=RadiationConditions, color=RadiationConditions))+
+  geom_boxplot()
+```
+
+
+
+```{r}
+VegMinRad3Water <- filter(VegMinRad2, F_H2O>-900)
+VegMinRad3Water$WUE <- VegMinRad3Water$FloorVegPhotoMol / VegMinRad3Water$F_H2O
+VegMinRad3Water$WUEScaled <- VegMinRad3Water$FloorVegPhotoMolScaled / ((VegMinRad3Water$F_H2O/18.01528))
+VegMinRad3Water$DiffFractFraction <- VegMinRad3Water$DiffFract_minute/100
+VegMinRad3Water <- filter(VegMinRad3Water, WUEScaled<22 & WUEScaled>(-10))
+```
+
+```{r}
+WUEShoot<- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Water-use efficiency,',paste('normalized photosynthetic rate ',H[2],'O ','mmol'^{-1}))))+
+  geom_point(data=ShootMinRad2WUE, aes(y=WUE_mmol,x=DiffFractFraction), alpha=0.1, shape=1,size=0.1,stroke =0.5, color='#DD673A')+
+  stat_poly_eq(formula = my.formula,
+               data = ShootMinRad2WUE,
+               aes(y=WUE_mmol,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#DD673A')+
+  geom_point(data=VegMinRad3Water, aes(y=WUEScaled,x=DiffFractFraction), alpha=0.1, shape=1,size=0.1,stroke =0.5, color='#009D77')+
+  stat_poly_eq(formula = my.formula,
+               data = VegMinRad3Water,
+               aes(y=WUEScaled,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=0.9,
+               color='#009D77')+
+  guides(color=guide_legend(override.aes=list(fill=NA)))+
+  theme(legend.title = element_text(face = "bold"))+
+  xlab("Diffuse fraction")+
+  scale_color_manual(name=NA,
+                     breaks=c('Shoot', 'Forest Floor', 'Ecosystem'),
+                     values=c('Shoot'='#DD673A', 'Forest Floor'='#009D77','Ecosystem'='#494454'))+
+  geom_smooth(data=ShootMinRad2WUE, aes(y=WUE_mmol,x=DiffFractFraction, color='Shoot'), method = lm, se=TRUE)+
+  geom_smooth(data=VegMinRad3Water, aes(y=WUEScaled,x=DiffFractFraction, color='Forest Floor'), method = lm, se=TRUE)+
+  theme(legend.title = element_blank())+
+  annotate("text", x = 1, y=250, label ="B", family = "sans", fontface = "bold", size=4)
+```
+
+
+```{r}
+VegMinRad2ScaledRUE <- VegMinRad2
+VegMinRad2ScaledRUE$RUEScaled <- VegMinRad2$FloorVegPhotoMolScaled / VegMinRad2$PARtotal_minute
+VegMinRad2ScaledRUE <- filter(VegMinRad2ScaledRUE, RUEScaled<0.010)
+VegMinRad2ScaledRUE$DiffFractFraction <- VegMinRad2ScaledRUE$DiffFract_minute/100
+
+
+
+VegMinRad2ScaledWUE <- VegMinRad3Water
+VegMinRad2ScaledWUE$DiffFractFraction <- VegMinRad2ScaledWUE$DiffFract_minute/100
+VegMinRad2ScaledWUE$WUE_mmol <- VegMinRad2ScaledWUE$FloorVegPhotoMolScaled / ((VegMinRad2ScaledWUE$F_H2O)/18.01528)
+```
+
+# Graphs
+
+```{r}
+scaleFactor <- max(Ecosystem$RUE) / max(ShootMinRad2RUE$RUEScaled)
+Ecosystem$DiffFractFraction <- Ecosystem$DiffFract/100
+RUEEco <- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Ecosystem light-use efficiency, ',paste(CO[2], ' ',mu,'mol PAR ',mu,'mol'^{-1}))))+
+  geom_point(data=EcosystemRUE, aes(y=RUE,x=DiffFractFraction), alpha=0.1, shape=1,size=0.1,stroke =0.5, color="#5986F1")+
+  geom_smooth(data=EcosystemRUE, aes(y=RUE,x=DiffFractFraction, color='Ecosystem'), method = lm, se=TRUE)+
+  stat_poly_eq(formula = my.formula,
+               data = EcosystemRUE,
+               aes(y=RUE,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#5986F1')+
+  guides(color=guide_legend(override.aes=list(fill=NA)))+
+  theme(legend.title = element_text(face = "bold"))+
+  xlab("Diffuse fraction")+
+  coord_cartesian(xlim =c(0,1), ylim = c(-0.01,NA))+
+  scale_color_manual(name='Scale',
+                     breaks=c('Shoot', 'Forest Floor', 'Ecosystem'),
+                     values=c('Shoot'='#DD673A', 'Forest Floor'='#009D77','Ecosystem'='#5986F1'))+
+  theme(legend.title = element_blank())+
+  theme(
+        axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  annotate("text", x = 1, y=0.12, label ="A", family = "sans", fontface = "bold", size=4)
+```
+
+
+
+```{r}
+RUEShoot<- ggplot()+
+  theme_PlainGray()+
+  labs(y=expression(atop('Light-use efficiency,',paste('normalized photosynthetic rate ','PAR ',mu,'mol'^{-1}))))+
+  geom_point(data=ShootMinRad2RUE, aes(y=RUEScaled,x=DiffFractFraction), alpha=0.05, shape=1,size=0.1,stroke =0.5, color='#DD673A')+
+  stat_poly_eq(formula = my.formula,
+               data = ShootMinRad2RUE,
+               aes(y=RUEScaled,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=1,
+               color='#DD673A')+
+  geom_point(data=VegMinRad2ScaledRUE, aes(y=RUEScaled,x=DiffFractFraction), alpha=0.1, shape=1,size=0.1,stroke =0.5, color='#67BAA6')+
+  stat_poly_eq(formula = my.formula,
+               data = VegMinRad2ScaledRUE,
+               aes(y=RUEScaled,x=DiffFractFraction, label = paste(..rr.label..,p.value.label,paste("N ~`=`~", n), sep = "*\", \"*")),
+               parse = TRUE,
+               label.y=0.9,
+               color='#009D77')+
+  guides(color=guide_legend(override.aes=list(fill=NA)))+
+  theme(legend.title = element_text(face = "bold"))+
+  xlab("Diffuse fraction")+
+  geom_smooth(data=ShootMinRad2RUE, aes(y=RUEScaled,x=DiffFractFraction, color='Shoot'), method = lm, se=TRUE)+
+  geom_smooth(data=VegMinRad2ScaledRUE, aes(y=RUEScaled,x=DiffFractFraction, color='Forest Floor'), method = lm, se=TRUE)+
+  scale_color_manual(name=NA,
+                     breaks=c('Shoot', 'Forest Floor', 'Ecosystem'),
+                     values=c('Shoot'='#DD673A', 'Forest Floor'='#009D77','Ecosystem'='#494454'))+
+  coord_cartesian(xlim =c(0,1))+
+  theme(legend.title = element_blank())+
+    annotate("text", x = 1, y=0.0075, label ="B", family = "sans", fontface = "bold", size=4)
+```
+
+```{r}
+# Environmental conditions 
+desired_breaks <- seq(0.1,1, by=0.05)
+df_pca2 <- Ecosystem[, c('PARtotal_30','HYY_META.diffPAR','DiffFractFraction','Temp', 'RH', 'VPDcalcKPa','HYY_EDDY233.GPP', 'RadiationConditions')]
+
+df_pca2[,c(3,2,8)]
+
+
+nls_model <- nls(HYY_META.diffPAR ~ gamma + (1-gamma)*(1-exp(-beta_1*DiffFractFraction-beta_2*(DiffFractFraction**2)-beta_3*(DiffFractFraction**3)-beta_4*(DiffFractFraction**4))),
+                 data = df_pca2[,c(3,2)],
+                 start = list(gamma=41.183491, beta_1= -15.840936,beta_2=41.636015 ,beta_3=-51.224045 ,beta_4=23.304743))
+
+
+summary(nls_model)
+
+resultR2 <- modelr::rsquare(nls_model, df_pca2[,c(3,2)])
+lb1 <- round(resultR2,2)
+
+DiffRad <- ggplot()+
+  labs(y=expression(paste('PARd, ',mu,'mol ',m^{-2},' ',s^{-1})),
+       x=expression('Diffuse fraction'))+
+  geom_point(data=df_pca2[,c(3,2,8)], aes(y=HYY_META.diffPAR,x=DiffFractFraction, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = df_pca2[,c(3,2)],
+              aes(x=DiffFractFraction,y=HYY_META.diffPAR),
+              method = "nls", formula = y ~ gamma + (1-gamma)*(1-exp(-beta_1*x-beta_2*(x**2)-beta_3*(x**3)-beta_4*(x**4))),
+              method.args = list(start = c(gamma=41.183491, beta_1= -15.840936,beta_2=41.636015 ,beta_3=-51.224045 ,beta_4=23.304743)),
+              se = FALSE,
+              na.rm = TRUE,
+              color='black')+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  ylim(0, NA)+
+  theme(legend.title = element_text(face = "bold"))+
+  stat_summary_bin(data=df_pca2[,c(3,2,8)], aes(y=HYY_META.diffPAR,x=DiffFractFraction, color=RadiationConditions),
+                   geom = "pointrange", fun.data = "mean_se",
+                   breaks = desired_breaks)+
+  annotate("text", x = 1, y=1000, label ="B", family = "sans", fontface = "bold", size=4)+
+  theme_PlainGray()+
+  annotate('text', 0.25, 1000, 
+           label=paste("~italic(Pseudo)~italic(R)^2==", lb1), 
+           parse=TRUE, size=4, family = "sans")+
+  theme(legend.title = element_text(face = "bold"))
+```
+
+
+
+```{r}
+# Total PAR
+
+df_pca2[,c(3,1,8)]
+
+PAR <- ggplot()+
+  labs(y=expression(paste('PARt, ',mu,'mol ',m^{-2},' ',s^{-1})),
+       x=expression('Diffuse fraction'))+
+  geom_point(data=df_pca2[,c(3,1,8)], aes(y=PARtotal_30,x=DiffFractFraction, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = df_pca2[,c(3,1)],
+              aes(x=DiffFractFraction,y=PARtotal_30),
+              method = "lm", formula = y ~ x,
+              se = FALSE,
+              na.rm = TRUE,
+              color='black')+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  ylim(0, NA)+
+  theme(legend.title = element_text(face = "bold"))+
+  stat_summary_bin(data=Bins2, aes(y=PARtotal_30,x=DiffFractFraction, color=RadiationConditions),
+                   geom = "pointrange", fun.data = "mean_se",
+                   breaks = desired_breaks)+
+  theme_PlainGray()+
+  annotate("text", x = 1, y=1500, label ="A", family = "sans", fontface = "bold", size=4)+
+  theme(axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  stat_poly_eq(formula = my.formula,
+               data = df_pca2[,c(3,1)],
+               aes(x=DiffFractFraction,y=PARtotal_30, label = paste(..rr.label..,p.value.label, sep = "*\", \"*")),
+               parse = TRUE,
+               size=4)+
+  theme(legend.title = element_text(face = "bold"))
+```
+
+
+```{r}
+# Temp
+
+df_pca2[,c(3,4,8)]
+
+Temp <- ggplot()+
+  labs(y=expression(paste('Air temperature, °C')),
+       x=expression('Diffuse fraction'))+
+  geom_point(data=df_pca2[,c(3,4,8)], aes(y=Temp,x=DiffFractFraction, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = df_pca2[,c(3,4)],
+              aes(x=DiffFractFraction,y=Temp),
+              method = "lm", formula = y ~ x,
+              se = FALSE,
+              na.rm = TRUE,
+              color='black')+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  ylim(0, NA)+
+  theme(legend.title = element_text(face = "bold"))+
+  theme_PlainGray()+
+  annotate("text", x = 1, y=30, label ="C", family = "sans", fontface = "bold", size=4)+
+  theme(axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  stat_poly_eq(formula = my.formula,
+               data = df_pca2[,c(3,4)],
+               aes(x=DiffFractFraction,y=Temp, label = paste(..rr.label..,p.value.label, ..eq.label..,sep = "*\", \"*")),
+               parse = TRUE,
+               size=4)+
+  theme(legend.title = element_text(face = "bold"))
+```
+
+
+```{r}
+#RH
+df_pca2[,c(3,5,8)]
+
+RH <- ggplot()+
+  labs(y=expression(paste('Relative humidity, %')),
+       x=expression('Diffuse fraction'))+
+  geom_point(data=df_pca2[,c(3,5,8)], aes(y=RH,x=DiffFractFraction, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = df_pca2[,c(3,5)],
+              aes(x=DiffFractFraction,y=RH),
+              method = "lm", formula = y ~ x,
+              se = FALSE,
+              na.rm = TRUE,
+              color='black')+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  ylim(0, NA)+
+  theme(legend.title = element_text(face = "bold"))+
+  stat_summary_bin(data=Bins4, aes(y=RH,x=DiffFractFraction, color=RadiationConditions),
+                   geom = "pointrange", fun.data = "mean_se",
+                   breaks = desired_breaks)+
+  theme_PlainGray()+
+  annotate("text", x = 1, y=105, label ="D", family = "sans", fontface = "bold", size=4)+
+  theme(axis.line.x = element_blank(),  # remove x axis line
+        axis.text.x = element_blank(),  # remove x axis labels
+        axis.ticks.x = element_blank(), # remove x axis ticks
+        axis.title.x = element_blank())+
+  stat_poly_eq(formula = my.formula,
+               data = df_pca2[,c(3,5)],
+               aes(x=DiffFractFraction,y=RH, label = paste(..rr.label..,p.value.label, sep = "*\", \"*")),
+               parse = TRUE,
+               size=4)+
+  theme(legend.title = element_text(face = "bold"))
+```
+
+
+```{r}
+#VPD
+df_pca2[,c(3,6,8)]
+
+VPDMod <- lm(VPDcalcKPa ~ DiffFractFraction, data=df_pca2[,c(3,6)])
+summary(VPDMod)$r.squared
+summary(VPDMod)
+
+VPD <- ggplot()+
+  labs(y=expression(paste('Vapor pressure deficit, kPa')),
+       x=expression('Diffuse fraction'))+
+  geom_point(data=df_pca2[,c(3,6,8)], aes(y=VPDcalcKPa,x=DiffFractFraction, color=RadiationConditions),
+             alpha=0.1, shape=1,size=0.1,stroke =0.5)+
+  stat_smooth(data = df_pca2[,c(3,6)],
+              aes(x=DiffFractFraction,y=VPDcalcKPa),
+              method = "lm", formula = y ~ x,
+              se = FALSE,
+              na.rm = TRUE,
+              color='black')+
+  scale_color_manual(name="Radiation conditions", labels = c(diffuse_exp,direct_exp,heterogenous_exp),values=c("#6852ec","gold3","#a09a99"))+
+  theme(legend.title = element_text(face = "bold"))+
+  stat_summary_bin(data=Bins5, aes(y=VPDcalcKPa,x=DiffFractFraction, color=RadiationConditions),
+                  geom = "pointrange", fun.data = "mean_se",
+                   breaks = desired_breaks)+
+  theme_PlainGray()+
+  annotate("text", x = 1, y=3, label ="E", family = "sans", fontface = "bold", size=4)+
+  stat_poly_eq(formula = my.formula,
+               data = df_pca2[,c(3,6)],
+               aes(x=DiffFractFraction,y=VPDcalcKPa, label = paste(..rr.label..,p.value.label, sep = "*\", \"*")),
+               parse = TRUE,
+               size=4)+
+  theme(legend.title = element_text(face = "bold"))
+```
+
+
+```{r}
+## Below&Above PAR
+BelowEcos <- left_join(Ecosystem, BelowPAR, by='Datetime')
+BelowEcos <- filter(BelowEcos, (!is.na(BelowEcos$HYY_META.maaPAR)))
+
+left <- ggplot(BelowEcos, aes(x=HYY_META.maaPAR,y=RadiationConditions, fill=RadiationConditions))+
+  geom_density_ridges(aes(group=RadiationConditions), color=NA, alpha=0.8,scale =5,bandwidth = bw.SJ(BelowEcos$HYY_META.maaPAR))+
+  theme_ridges() +
+  scale_fill_manual(values=c("#6852ec","gold3","#a09a99"),guide = "none")+
+  scale_y_discrete(labels=c(diffuse_exp,direct_exp,heterogenous_exp))+
+  labs(x=expression(paste('Mean below canopy PAR, ',mu,'mol ', m^{-2}, s^{-1})))+
+  theme_PlainGray()+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        axis.ticks.y = element_line(color = "black", size = 0.2),
+        panel.grid.major.y = element_line(color = "black", size = 0.2))+
+  geom_vline(data = subset(BelowEcos, RadiationConditions == "Diffuse"), 
+             aes(xintercept = mean(HYY_META.maaPAR), color='Diffuse'),size=1,show.legend=TRUE,linetype='solid')+
+  geom_vline(data = subset(BelowEcos, RadiationConditions == "Direct"), 
+             aes(xintercept = mean(HYY_META.maaPAR), color='Direct'), size=1, show.legend =TRUE,linetype='dotdash')+
+  geom_vline(data = subset(BelowEcos, RadiationConditions == "Heterogeneous"), 
+             aes(xintercept = mean(HYY_META.maaPAR), color='Heterogeneous'), size=1, show.legend =TRUE, linetype='longdash')+
+  scale_color_manual(name = expression(paste(bold('Radiation Conditions'))), 
+                        values = c(Diffuse = "#6852ec",Direct="gold3", Heterogeneous = "#a09a99"), 
+                        labels = c(diffuse_exp,direct_exp,heterogenous_exp))+
+  scale_x_continuous(expand = c(0, 0))+
+  ggtitle('A')+
+  theme(plot.title = element_text(hjust = -0.1, vjust = -20))+
+  theme(legend.position="top",
+        axis.text.y = element_text(hjust = 1, vjust=-0.3))
+```
+
+
+```{r}
+BelowDif <- filter(BelowEcos,RadiationConditions=='Diffuse')
+BelowDir <- filter(BelowEcos,RadiationConditions=='Direct')
+BelowHet <- filter(BelowEcos,RadiationConditions=='Heterogeneous')
+
+right <- ggplot()+
+  geom_point(data=BelowHet, aes(y=HYY_META.maaPAR,x=PARtotal_30),alpha=0.1, shape=16,size=1,stroke =0.5, color='#a09a99')+
+  geom_point(data=BelowDir, aes(y=HYY_META.maaPAR,x=PARtotal_30), alpha=0.1,shape=16,size=1,stroke =0.5, color="gold3")+
+  geom_point(data=BelowDif, aes(y=HYY_META.maaPAR,x=PARtotal_30),  alpha=0.05,shape=16,size=1,stroke =0.5,  color="#6852ec")+
+  labs(y=expression(paste('Below canopy PAR, ',mu,'mol ', m^{-2}, s^{-1})), x=expression(paste('Above canopy PAR, ',mu,'mol ', m^{-2}, s^{-1})))+
+  theme_PlainGray()+
+  ylim(c(NA, 1000))+
+  geom_smooth(data=BelowDif, 
+              aes(y=HYY_META.maaPAR,x=PARtotal_30), 
+              method = lm, se=FALSE,  color="#6852ec")+
+  stat_smooth(data = BelowDir,
+              aes(x=PARtotal_30,y=HYY_META.maaPAR),
+              method = "nls", formula = y ~ a*exp(-x/b),
+              method.args = list(start = c(a=14.2, b=-464)),
+              se = FALSE,
+              na.rm = TRUE, color="gold3")+
+  stat_smooth(data = BelowHet,
+              aes(x=PARtotal_30,y=HYY_META.maaPAR),
+              method = "nls", formula = y ~ a*exp(-x/b),
+              method.args = list(start = c(a=14.2, b=-464)),
+              se = FALSE,
+              na.rm = TRUE,
+              color='#a09a99')+
+  guides(fill="none")+
+  ggtitle('B')+
+  theme(plot.title = element_text(hjust = -0.5, vjust = -20))
+```
+
+# PCA analysis
+
+## Ecosystem
+
+```{r}
+# Replacing Na
+EcoWaterData <- EcosystemWater[, c('Datetime', 'WUE')]
+
+EcoPCA <- left_join(EcosystemRUE, EcoWaterData, by='Datetime')
+
+df_pca <- EcoPCA[, c('PARtotal_30','HYY_META.diffPAR','DiffFractFraction','Temp', 'RH', 'VPDcalcKPa','HYY_EDDY233.GPP','RUE','WUE')]
+
+nb = estim_ncpPCA(df_pca,ncp.max=5)
+res.comp = imputePCA(df_pca,ncp=2, scale=TRUE,  method = "Regularized")
+df_pca_full <- as.data.frame(res.comp$comp)
+df_pca_full$RadiationConditions <- EcoPCA$RadiationConditions
+```
+
+
+```{r}
+# Running the PCA and extracting data for graph
+pca_res<- PCA(df_pca_full, scale.unit = TRUE, ncp = 4, quanti.sup=7:9, quali.sup = 10)
+pca_res
+
+df_pca_full$PC1 <- pca_res$ind$coord[,1]
+df_pca_full$PC2 <- pca_res$ind$coord[,2]
+
+pca.vars <- pca_res$var$coord %>% data.frame
+
+pca.vars$vars <- rownames(pca.vars)
+pca.vars.m <- melt(pca.vars, id.vars = "vars")
+pca.vars.sup <- pca_res$quanti.sup$coord %>% data.frame
+
+pca.vars.sup$vars <- rownames(pca.vars.sup)
+
+pca.vars.m.sup <- melt(pca.vars.sup, id.vars = "vars")
+
+Eco <- ggplot()+
+  geom_point(data=df_pca_full, aes(x=PC1, y=PC2, color=DiffFractFraction, size=HYY_META.diffPAR),alpha=0.06,shape=16)+
+  scale_color_gradientn(colours=c("gold3",'#a09a99','#6852ec','#6852ec'),
+                        breaks=c(0.0,0.2,0.6,1.0),labels=c(0.0,0.2,0.6,1.0),
+                        limits=c(0,1),
+                        name = "Diffuse fraction")+
+  scale_size_binned(expression(paste('PARd, ',mu,'mol ', m^{-2}, s^{-1})),range = c(0.05, 2.5))+
+  geom_segment(data = pca.vars, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.5)+
+  geom_segment(data = pca.vars.sup, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.75,linetype = "longdash", color="#5986F1")+
+  geom_text_repel(data = pca.vars.sup,
+                  aes(x = (Dim.1*4), y = (Dim.2*4+0.2), label = c('GPP','LUE','WUE')),
+                  fontface = "bold", size = 3, family="sans",
+                  color = "#5986F1",
+                  bg.color = alpha(c("grey30"),0.5),
+                  bg.r = .05, 
+                  position = position_nudge_center(x = 0.1, center_x = 0))+
+  theme_PlainGray()+
+  geom_hline(yintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) +
+  geom_vline(xintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) + 
+  annotate(geom="text", x=3.9, y=0.85, label="PARt",size = 3,family="sans")+
+  annotate(geom="text", x=4.2, y=0.35, label="Temperature",size = 3,family="sans")+
+  annotate(geom="text", x=4.2, y=-0.1, label="VPD",size = 3,family="sans")+
+  annotate(geom="text", x=-3.8, y=-0.6, label="RH",size = 3,family="sans")+
+  annotate(geom="text", x=-3.0, y=1.2, label="Diffuse fraction",size = 3,family="sans")+
+  annotate(geom="text", x=-0.5, y=4.3, label="PARd",size = 3,family="sans")+
+  xlab('PCA1 (64.1%)')+
+  ylab('PCA2 (17.9%)')+
+  annotate("text", x = 5, y=4, label ="A", family = "sans", fontface = "bold", size=4)
+```
+
+
+
+## Shoots
+
+```{r}
+# Replacing NA
+ShootMinRad2WUE$PCA_group <- paste(ShootMinRad2WUE$TrueDateTime, '_', ShootMinRad2WUE$Chamber)
+ShootWUE <- ShootMinRad2WUE[,c('PCA_group', 'WUE_mmol')]
+
+ShootMinRad2RUE$PCA_group <- paste(ShootMinRad2RUE$TrueDateTime, '_', ShootMinRad2RUE$Chamber)
+ShootPCA <- left_join(ShootMinRad2RUE, ShootWUE, by='PCA_group')
+
+df_pca_shoot <- ShootPCA[, c('PARtotal_minute','DiffusePARtotal_minute','DiffFractFraction','Temp', 'RH', 'VPDcalcKPa','ShootPhotoMolScaled','RUEScaled','WUE_mmol')]
+
+nb = estim_ncpPCA(df_pca_shoot,ncp.max=5)
+
+res.comp_shoot = imputePCA(df_pca_shoot,ncp=2, scale=TRUE,  method = "Regularized")
+df_pca_full_shoot <- as.data.frame(res.comp_shoot$comp)
+df_pca_full_shoot$RadiationConditions <- ShootPCA$RadiationConditions
+
+pca_res_shoot<- PCA(df_pca_full_shoot, scale.unit = TRUE, ncp = 4, quanti.sup=7:9, quali.sup = 10)
+```
+
+```{r}
+# Extracting data
+df_pca_full_shoot$PC1 <- pca_res_shoot$ind$coord[,1]
+df_pca_full_shoot$PC2 <- pca_res_shoot$ind$coord[,2]
+
+pca.vars_shoot <- pca_res_shoot$var$coord %>% data.frame
+
+pca.vars_shoot$vars <- rownames(pca.vars_shoot)
+
+pca.vars.m_shoot <- melt(pca.vars_shoot, id.vars = "vars")
+
+pca.vars.sup_shoot <- pca_res_shoot$quanti.sup$coord %>% data.frame
+
+pca.vars.sup_shoot$vars <- rownames(pca.vars.sup_shoot)
+
+pca.vars.m.sup_shoot <- melt(pca.vars.sup_shoot, id.vars = "vars")
+
+
+Shoot <- ggplot()+
+  geom_point(data=df_pca_full_shoot, aes(x=PC1, y=PC2, color=DiffFractFraction, size=DiffusePARtotal_minute),alpha=0.06,shape=16)+
+  scale_color_gradientn(colours=c("gold3",'#a09a99','#6852ec','#6852ec'),
+                        breaks=c(0.0,0.2,0.6,1.0),labels=c(0.0,0.2,0.6,1.0),
+                        limits=c(0,1),
+                        name = "Diffuse fraction")+
+  geom_segment(data = pca.vars_shoot, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.5)+
+  geom_segment(data = pca.vars.sup_shoot, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.75,linetype = "longdash", color="#DD673A")+
+  geom_text_repel(data = pca.vars.sup_shoot,
+                  aes(x = (Dim.1*4), y = (Dim.2*4), label = c('Shoot photosynthesis,\nscaled','LUE','WUE')),
+                  fontface = "bold", size = 3, family="sans",
+                  color = "#DD673A",
+                  bg.color = alpha(c("grey30"),0.5),
+                  bg.r = .05, 
+                  position = position_nudge_center(y = 0.1, center_y = 0))+
+  theme_PlainGray()+
+  geom_hline(yintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) +
+  geom_vline(xintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) + 
+  annotate(geom="text", x=4.3, y=0.8, label="PARt, min",size = 3,family="sans")+
+  annotate(geom="text", x=2.5, y=-0.3, label="Temperature",size = 3,family="sans")+
+  annotate(geom="text", x=4.2, y=-0.05, label="VPD",size = 3,family="sans")+
+  annotate(geom="text", x=-3.55, y=0, label="RH",size = 3,family="sans")+
+  annotate(geom="text", x=-2.35, y=1.1, label="Diffuse fraction, min",size = 3,family="sans")+
+  annotate(geom="text", x=0, y=4.3, label="PARd, min",size = 3,family="sans")+
+  xlab('PCA1 (64.3%)')+
+  ylab('PCA2 (18.1%)')+
+  scale_size_binned(guide='none',n.breaks=6, name=expression(paste('PARd, ',mu,'mol ', m^{-2}, s^{-1})),range = c(0.05, 2.5))+
+  annotate("text", x = 5.4, y=4, label ="B", family = "sans", fontface = "bold", size=4)
+Shoot
+```
+
+
+
+
+## Forest floor vegetation
+
+```{r}
+VegMinRad3Water$PCA_group <- paste(VegMinRad3Water$TrueDateTime,'_',VegMinRad3Water$Chamber)
+VegMinRad2ScaledRUE$PCA_group <- paste(VegMinRad2ScaledRUE$TrueDateTime,'_',VegMinRad2ScaledRUE$Chamber)
+
+VegWUE <- VegMinRad3Water[,c('PCA_group','WUEScaled')]
+VegRUE <- VegMinRad2ScaledRUE[,c('RUEScaled','PCA_group')]
+
+VegMinRad2$PCA_group <- paste(VegMinRad2$TrueDateTime,'_',VegMinRad2$Chamber)
+VegPCA <- left_join(VegMinRad2, VegWUE, by='PCA_group')
+VegPCA <- left_join(VegPCA, VegRUE, by='PCA_group')
+
+
+VegPCA <- VegPCA[,!names(VegPCA) %in% c('RUEScaled.x')]
+
+VegPCA$DiffFractFraction <- VegPCA$DiffFract_minute /100
+
+# Replacing NA
+df_pca_veg <- VegPCA[, c('PARtotal_minute','DiffusePARtotal_minute','DiffFractFraction','Temp', 'RH', 'VPDcalcKPa','FloorVegPhotoMolScaled','RUEScaled','WUEScaled')]
+nb = estim_ncpPCA(df_pca_veg,ncp.max=5)
+
+
+res.comp_veg = imputePCA(df_pca_veg,ncp=2, scale=TRUE,  method = "Regularized")
+df_pca_full_veg <- as.data.frame(res.comp_veg$comp)
+df_pca_full_veg$RadiationConditions <- VegPCA$RadiationConditions
+
+# Running PCA
+pca_res_veg<- PCA(df_pca_full_veg, scale.unit = TRUE, ncp = 4, quanti.sup=7:9, quali.sup = 10)
+```
+
+
+```{r}
+# Extracting data for graphs
+df_pca_full_veg$PC1 <- pca_res_veg$ind$coord[,1]
+df_pca_full_veg$PC2 <- pca_res_veg$ind$coord[,2]
+
+pca.vars_veg <- pca_res_veg$var$coord %>% data.frame
+
+pca.vars_veg$vars <- rownames(pca.vars_veg)
+
+pca.vars.m_veg <- melt(pca.vars_veg, id.vars = "vars")
+
+pca.vars.sup_veg <- pca_res_veg$quanti.sup$coord %>% data.frame
+
+pca.vars.sup_veg$vars <- rownames(pca.vars.sup_veg)
+
+pca.vars.m.sup_veg <- melt(pca.vars.sup_veg, id.vars = "vars")
+
+
+Veg <- ggplot()+
+  geom_point(data=df_pca_full_veg, aes(x=PC1, y=PC2, color=DiffFractFraction, size=DiffusePARtotal_minute),alpha=0.1,shape=16)+
+  scale_color_gradientn(colours=c("gold3",'#a09a99','#6852ec','#6852ec'),
+                        breaks=c(0.0,0.2,0.6,1.0),labels=c(0.0,0.2,0.6,1.0),
+                        limits=c(0,1),
+                        name = "Diffuse fraction")+
+  geom_segment(data = pca.vars_veg, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.5)+
+  geom_segment(data = pca.vars.sup_veg, aes(x = 0, xend = Dim.1*4, y = 0, yend = Dim.2*4),
+               arrow = arrow(length = unit(0.01, "npc"), type = "open"), 
+               lwd = 0.75,linetype = "longdash", color="#009D77")+
+  geom_text_repel(data = pca.vars.sup_veg,
+                  aes(x = ((Dim.1*4)-0.1), y = (Dim.2*4), label = c('Forest floor vegetation\nphotosynthesis, scaled','LUE','WUE')),
+                  fontface = "bold", size = 3, family="sans",
+                  color = "#009D77",
+                  bg.color = alpha(c("grey30"),0.5),
+                  bg.r = .05,
+                  position = position_nudge_center(y=0.2, center_x = 0))+
+  theme_PlainGray()+
+  geom_hline(yintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) +
+  geom_vline(xintercept = 0, lty = 2, color = "grey", alpha = 0.9,linewidth = 0.1) + 
+  annotate(geom="text", x=4.2, y=0.8, label="PARt, min",size = 3,family="sans")+
+  annotate(geom="text", x=2.5, y=-0.40, label="Temperature",size = 3,family="sans")+
+  annotate(geom="text", x=4.2, y=-0.05, label="VPD",size = 3,family="sans")+
+  annotate(geom="text", x=-3.6, y=0, label="RH",size = 3,family="sans")+
+  annotate(geom="text", x=-2.45, y=1.3, label="Diffuse fraction, min",size = 3,family="sans")+
+  annotate(geom="text", x=0, y=4.2, label="PARd, min",size = 3,family="sans")+
+  xlab('PCA1 (63.9%)')+
+  ylab('PCA2 (18.2%)')+
+  scale_size_binned(guide='none',range = c(0.05, 2.5),n.breaks=6, name=expression(paste('PARd, ',mu,'mol ', m^{-2}, s^{-1})))+
+  annotate("text", x = 5, y=4, label ="C", family = "sans", fontface = "bold", size=4)
+```
+
+
